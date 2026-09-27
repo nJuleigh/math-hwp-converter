@@ -1,0 +1,41 @@
+# --- 원고와 산출물은 올리지 않는다 (examples/ 만 예외) ---
+*.pdf
+*.hwp
+*.hwpx
+*.tex
+!examples/Sample.tex
+*_dsl.txt
+!examples/Sample_dsl.txt
+*_numbermap.txt
+임시*
+out/
+chunks/
+run_all.bat
+*장-*.txt
+*장.txt
+부분-*.txt
+
+# 원서에서 잘라낸 그림
+images/
+figures/
+img/
+*.png
+*.jpg
+*.jpeg
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# pywin32 gencache
+gen_py/
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+~$*

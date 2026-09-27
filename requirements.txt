@@ -1,0 +1,3 @@
+# tex → DSL, 수식 변환은 표준 라이브러리만 쓴다.
+# 아래는 윈도우에서 hwp 를 만들 때(make_hwp_from_txt.py, merge_hwp.py)만 필요.
+pywin32>=306; sys_platform == "win32"
