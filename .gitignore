@@ -3,9 +3,7 @@
 *.hwp
 *.hwpx
 *.tex
-!examples/Sample.tex
 *_dsl.txt
-!examples/Sample_dsl.txt
 *_numbermap.txt
 임시*
 out/

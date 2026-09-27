@@ -17,7 +17,7 @@
                                             └─ latex_to_hwp.py : LaTeX 수식 → 한글 수식 스크립트
 ```
 
-LaTeX 문서의 본문·문제·해설·수식·그림 구조를 한 줄 단위의 중간 언어 **DSL** 로 바꾼 뒤, Python 과 한컴오피스 **COM 자동화**(`win32com`)로 한글을 조종해 문서를 만듭니다. DSL 은 사람이 읽고 손으로 고칠 수 있는 형식입니다 ([docs/DSL.md](docs/DSL.md)).
+LaTeX 문서의 본문·문제·해설·수식·그림 구조를 한 줄 단위의 중간 언어 **DSL** 로 바꾼 뒤, Python 과 한컴오피스 **COM 자동화**(`win32com`)로 한글을 조종해 문서를 만듭니다. DSL 은 사람이 읽고 손으로 고칠 수 있는 형식입니다 (아래 "DSL 명령").
 
 지원 범위:
 
@@ -42,7 +42,7 @@ LaTeX 문서의 본문·문제·해설·수식·그림 구조를 한 줄 단위�
 
 ## 개발 흐름과 실패한 시도
 
-자세한 내용은 [docs/HISTORY.md](docs/HISTORY.md).
+자세한 내용은 [HISTORY.md](HISTORY.md).
 
 1. **v0 — 이미지/PDF 직접 변환 (보류)** — 사진에서 옮겨 적은 `TEXT:`/`EQ:` 파일을 COM 으로 한글에 넣는 실험. 수식이 편집 가능한 객체로 들어가는 것은 확인했으나, OCR 오류와 변환 오류가 섞여 원인 분리가 안 됨 → OCR 을 떼어내고 LaTeX 입력으로 전환.
 2. **tex 파서 추가** — `.tex` 를 읽어 DSL 을 만들고 해설을 미주로 빼는 구조로 확장. 그러나 COM 은 문서가 커질수록 느려져 대규모 원고에 수 시간이 걸림.
@@ -59,19 +59,9 @@ src/
   cut_dsl.py                DSL 에서 특정 문제 구간만 잘라내기 (시험 실행용)
   make_hwp_from_txt.py      DSL → .hwp          (윈도우 + 한글)
   merge_hwp.py              여러 .hwp 를 한 파일로 (윈도우 + 한글)
+  hwp_read.py               한글 없이 .hwp 본문 문단 읽기 (--attach 의 문항 찾기에 사용)
   register_hwp_security.py  한글 자동화 보안 모듈 등록 도우미 (윈도우)
-tools/
-  sim_build.py              한글 없이 make_hwp 의 문단 구조만 흉내내서 출력
-  hwp_read.py               한글 없이 .hwp 본문 문단 텍스트 읽기 (최소 OLE/레코드 파서)
-examples/
-  Sample.tex                문제 1개 + 해설 예시
-  Sample_dsl.txt            위 파일을 tex_to_dsl.py 로 변환한 결과
-docs/
-  DSL.md                    DSL 명령 명세
-  HISTORY.md                개발 흐름, 실패한 시도와 원인
-legacy/
-  v0-init/                  이미지→hwp 첫 실험 (참고용)
-  v3-hwpx-attempt/          hwpx 직접 생성 시도 당시 스크립트 (참고용)
+HISTORY.md                  개발 흐름, 실패한 시도와 원인
 ```
 
 ## 요구 사항
@@ -178,19 +168,36 @@ python src/latex_to_hwp.py "\frac{a+b}{c} = \sqrt{x}"
 python src/latex_to_hwp.py --selftest
 ```
 
-## 한글 없이 점검하기
+## DSL 명령
+
+`tex_to_dsl.py` 가 내는 것:
+
+| 명령 | 뜻 |
+|---|---|
+| `PROB: 라벨` | 문제 시작 (굵은 제목 문단) |
+| `TEXT: 본문` | 본문. 인라인 수식 앞뒤에서 나뉜다 |
+| `EQ: <LaTeX>` / `EQD: <LaTeX>` | 줄 안 수식 / 독립 행 가운데 정렬 수식 |
+| `BR:` | 문단 나누기 |
+| `SOL:` … `ENDSOL:` | 해설 블록 (기본 미주) |
+| `SEC: 제목` | 굵은 절 제목 |
+| `GOTO: N` | 기존 hwp 의 `N.` 문항 뒤로 이동 (`--attach` 전용) |
+| `FIX: 메모` | 작업 메모. 문서에 들어가지 않음 |
+| `NEWPAGE:` | 쪽 나누기 |
+
+손으로 DSL 을 다듬을 때 추가로 쓸 수 있는 것: `IMG: 경로 | 폭mm`, `FIG: 번호 | 설명 | 70x50`(자리표시자), `EQALIGN:` … `END:`(여러 줄 수식), `ALIGN:`, `INDENT: left=10 first=-10`, `SOURCE:`, `ANS:`, `UNSURE:`. 모르는 명령은 건너뛰고 마지막에 개수를 출력합니다.
+
+예:
 
 ```
-python tools/sim_build.py src/make_hwp_from_txt.py examples/Sample_dsl.txt   # 문단 구조 미리보기
-python tools/hwp_read.py 결과.hwp                                          # 만들어진 hwp 의 문단 텍스트 덤프
-```
-
-## 예시
-
-[examples/Sample.tex](examples/Sample.tex) 를 변환하면 [examples/Sample_dsl.txt](examples/Sample_dsl.txt) 가 그대로 나옵니다.
-
-```
-python src/tex_to_dsl.py -i examples/Sample.tex -o Sample_dsl.txt
+PROB: 예제 3-1. 연의 총수
+TEXT: 두 종류의 문자
+EQ: a,b
+TEXT: 를 사용하여 …
+BR:
+EQD: n>m\ge2
+SOL:
+TEXT: 첫 번째 방법 …
+ENDSOL:
 ```
 
 ## 라이선스
