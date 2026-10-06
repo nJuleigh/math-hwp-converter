@@ -45,7 +45,9 @@ SYMBOLS = {
 
     # 집합 / 논리
     "in": "in", "notin": "notin", "ni": "owns",
-    "subset": "subset", "subseteq": "subseteq",
+    "top": "T", "intercal": "T",
+    "bigoplus": "\u2a01", "bigotimes": "\u2a02", "trianglelefteq": "\u22b4", "triangleleft": "\u25c1", "lhd": "\u22b2", "unlhd": "\u22b4",   # 전치 A^\top -> A^T
+    "subset": "subset", "subseteq": "subseteq", "subsetneq": "\u228a", "supsetneq": "\u228b",   # ⊊ ⊋
     "supset": "supset", "supseteq": "supseteq",
     "cap": "cap", "cup": "cup", "setminus": "\u2216",   # ∖ (한글 키워드 불확실해 문자로)
     "emptyset": "emptyset", "varnothing": "emptyset",
@@ -98,7 +100,8 @@ SYMBOLS = {
 
     # 기타 기호
     "infty": "inf", "partial": "partial", "nabla": "nabla",
-    "angle": "angle", "triangle": "triangle", "square": "square",
+    "angle": "angle", "triangle": "triangle",
+    "square": "\u25a1", "Box": "\u25a1", "blacksquare": "\u25a0",   # □ ■ : 한글에 square 키워드 없음 (9/17 실측)
     "prime": "'", "degree": "degree", "hbar": "hbar", "ell": "l",
     "aleph": "aleph", "Re": "Re", "Im": "Im",
     "therefore": "therefore", "because": "because",
@@ -108,7 +111,8 @@ SYMBOLS = {
 
     # 간격
     "quad": "`", "qquad": "``", "thinspace": "~", "enspace": "~",
-    ",": "~", ";": "`", ":": "~", "!": "", " ": "~",
+    # \, (얇은 공백) 은 첨자 안에서 bar 의 범위를 깨뜨려서 (9/25 실측) 아예 지운다.
+    ",": "", ";": "`", ":": "~", "!": "", " ": "~",
 
     # 모델이 지어내는 명령들 (표준 LaTeX 에 없음)
     "maru": "", "circled": "", "kanji": "", "text{}": "",
@@ -118,7 +122,7 @@ SYMBOLS = {
     "displaystyle": "", "textstyle": "", "scriptstyle": "",
     "limits": "", "nolimits": "", "!": "", "bigl": "", "bigr": "",
     "Bigl": "", "Bigr": "", "biggl": "", "biggr": "", "Biggl": "", "Biggr": "",
-    "lvert": "|", "rvert": "|", "lVert": "||", "rVert": "||",
+    "lvert": "|", "rvert": "|", "lVert": "dline", "rVert": "dline",
     "bigcirc": "\u25cb", "arg": "rm arg it",
     "big": "", "Big": "", "bigg": "", "Bigg": "",
     "phantom": "", "vphantom": "",
@@ -129,6 +133,8 @@ DELIMS = {
     "(": "(", ")": ")", "[": "[", "]": "]",
     "\\{": "lbrace", "\\}": "rbrace",
     "|": "|", "\\|": "dline", "/": "/", "\\backslash": "\\",
+    "\\lVert": "dline", "\\rVert": "dline", "\\Vert": "dline",
+    "\\lvert": "|", "\\rvert": "|", "\\vert": "|",
     "<": "langle", ">": "rangle",
     "\\langle": "langle", "\\rangle": "rangle",
     "\\lfloor": "lfloor", "\\rfloor": "rfloor",
@@ -219,35 +225,53 @@ def read_atom(text: str, start: int) -> Tuple[str, int]:
 # 구조 명령 처리
 # ---------------------------------------------------------------------------
 
-def replace_environments(text: str) -> str:
-    """\\begin{env} ... \\end{env} -> HWP matrix/cases/eqalign."""
+ENV_STASH: dict = {}
+
+
+def replace_environments(text: str, _stash=None) -> str:
+    """\\begin{env} ... \\end{env} -> HWP matrix/cases/eqalign.
+
+    안쪽 환경부터 바꾼다 (aligned 안의 pmatrix 처럼 중첩될 때, 바깥 환경을 & 와 \\\\ 로 쪼개기 전에
+    안쪽을 먼저 변환해 자리표시자로 감춰두고, 마지막에 되돌린다).
+    """
+    top = _stash is None
+    stash = {} if top else _stash
     pattern = re.compile(r"\\begin\s*\{([A-Za-z*]+)\}")
     while True:
-        match = pattern.search(text)
-        if match is None:
-            return text
+        matches = list(pattern.finditer(text))
+        if not matches:
+            break
+        match = matches[-1]                       # 가장 안쪽(마지막에 시작하는) 환경
         name = match.group(1)
         end_token = r"\end{" + name + "}"
         end_index = text.find(end_token, match.end())
         if end_index == -1:
             raise ValueError(f"\\begin{{{name}}} 에 대응하는 \\end 가 없습니다.")
-
         body = text[match.end():end_index]
-        # array 는 {cc} 같은 열 정렬 인자를 하나 더 먹는다
         if name == "array":
             body = re.sub(r"^\s*\{[^{}]*\}", "", body, count=1)
-
         command, prefix, suffix = ENVIRONMENTS.get(name, ("matrix", "", ""))
-        rows = [r for r in re.split(r"\\\\", body)]
         converted_rows = []
-        for row in rows:
+        for row in re.split(r"\\\\", body):
             if not row.strip():
                 continue
             cells = [convert(c) for c in row.split("&")]
             converted_rows.append(" & ".join(cells))
-        inner = " # ".join(converted_rows)
-        replacement = f"{prefix}{command}{{{inner}}}{suffix}"
-        text = text[:match.start()] + replacement + text[end_index + len(end_token):]
+        # 앞뒤에 공백: 's\begin{pmatrix}' 가 'spmatrix{...}' 로 붙어 한글이 'spmatrix' 를 한 낱말로 읽는 것 방지 (9/17 실측)
+        replacement = f" {prefix}{command}{{{' # '.join(converted_rows)}}}{suffix} "
+        key = f"\x01ENV{len(stash)}\x01"
+        stash[key] = replacement
+        text = text[:match.start()] + key + text[end_index + len(end_token):]
+    if top:
+        # 자리표시자 복원 (안쪽이 바깥 안에 들어 있을 수 있으니 반복)
+        for _ in range(len(stash) + 1):
+            changed = False
+            for k, v in stash.items():
+                if k in text:
+                    text = text.replace(k, v); changed = True
+            if not changed:
+                break
+    return text
 
 
 def replace_two_group_command(text: str, command: str, template: str) -> str:
@@ -287,6 +311,53 @@ def replace_sqrt(text: str) -> str:
         else:
             converted = f" sqrt {{{convert(body)}}} "
         text = text[:start] + converted + text[after_body:]
+
+
+PHANTOM_MARK = "\x00PH\x00"
+EMPTY_BOX_CONTENT = re.compile(r"^(?:" + re.escape(PHANTOM_MARK) + r"|\\(?:quad|qquad|hskip|,|;|:|!)|[~`\s])*$")
+
+
+def replace_phantom(text: str) -> str:
+    r"""\phantom{...} 은 '보이지 않는 자리'이므로 내용을 지운다.
+
+    그 결과 \boxed{\phantom{답}} 처럼 속이 빈 상자는 한글에 \boxed 가 없어
+    아무것도 안 남게 되므로, 빈 네모(□)로 바꾼다. (답을 적어 넣는 빈칸)
+    """
+    # 1) \phantom{...} 류를 표시만 남기고 지운다 (중괄호가 중첩돼도 되도록 read_atom 사용)
+    for name in (r"\phantom", r"\hphantom", r"\vphantom"):
+        pos = 0
+        while True:
+            start = text.find(name, pos)
+            if start == -1:
+                break
+            tail = start + len(name)
+            if tail < len(text) and text[tail].isalpha():
+                pos = tail; continue
+            try:
+                _, after_body = read_atom(text, tail)
+            except Exception:
+                pos = tail; continue
+            text = text[:start] + PHANTOM_MARK + text[after_body:]
+            pos = start + len(PHANTOM_MARK)
+    # 2) 속이 비어 버린 \boxed -> □
+    pos = 0
+    while True:
+        start = text.find(r"\boxed", pos)
+        if start == -1:
+            break
+        tail = start + len(r"\boxed")
+        if tail < len(text) and text[tail].isalpha():
+            pos = tail; continue
+        try:
+            body, after_body = read_atom(text, tail)
+        except Exception:
+            pos = tail; continue
+        if EMPTY_BOX_CONTENT.fullmatch(body):
+            text = text[:start] + " □ " + text[after_body:]
+            pos = start + 3
+        else:
+            pos = tail
+    return text.replace(PHANTOM_MARK, " ")
 
 
 def replace_one_atom_command(text: str, command: str, before: str, after: str = "") -> str:
@@ -379,7 +450,9 @@ def replace_text_command(text: str) -> str:
             trail = " ~ " if body[-1:].isspace() else " "
             core = body.strip()
             # rm 은 '이후 전부'에 걸리는 모드 전환이므로 반드시 it 으로 복귀시킨다
-            if re.fullmatch(r"[A-Za-z]+", core):
+            # 한 글자 영문은 그대로, 두 글자 이상은 따옴표로 묶는다.
+            # (따옴표 없이 rm nullity it 로 두면 한글이 'nu' 를 ν 로 읽어 'νllity' 가 됨 — 9/17 실측)
+            if re.fullmatch(r"[A-Za-z]", core):
                 converted = f"rm {core} it"
             else:
                 converted = f'rm "{core}" it'
@@ -473,7 +546,8 @@ TWO_ARG_COMMANDS = (
 )
 ONE_ARG_COMMANDS = (
     "sqrt", "boxed", "text", "textbf", "textit", "mathbb", "mathcal",
-    "mathrm", "mathbf", "mathit", "bar", "hat", "widehat", "tilde",
+    "mathrm", "mathbf", "mathit", "boldsymbol", "bm", "mathsf", "mathscr",
+    "bar", "hat", "widehat", "tilde", "widetilde",
     "dot", "ddot", "vec", "overline", "underline", "overrightarrow",
     "underbrace", "overbrace", "pmod", "operatorname",
 )
@@ -600,11 +674,15 @@ def convert(latex: str) -> str:
     text = text.replace("$$", "").replace("$", "")
     # \[ ... \text{... \(A\) ...} ... \] 처럼 수식 안에 인라인 구분자가 다시
     # 들어오는 경우가 있다. 이미 수식 안이므로 구분자만 걷어낸다.
-    text = text.replace(r"\(", "").replace(r"\)", "")
+    text = re.sub(r"\\\\\s*\[[0-9.]+\s*(?:mm|pt|em|ex|cm)\]", r"\\\\", text)   # '\\[2mm]' 간격 지정 제거
+    text = text.replace("\\\\", "\\\\ ")            # '\\p(0)' 이 '\p' 로 읽히지 않게
+    text = re.sub(r"(?<!\\)\\\(", "", text); text = re.sub(r"(?<!\\)\\\)", "", text)   # 남은 인라인 구분자 제거 ('\\(' 줄바꿈+괄호는 보존)
+    text = re.sub(r"(\\[a-zA-Z]+)(\\begin\{)", r"\1 \2", text)   # '\det\begin{pmatrix}' -> '\det \begin{pmatrix}'
     text = text.replace(r"\%", "\x00PCT\x00")   # 4\% 의 % 는 주석이 아님
     text = re.sub(r"%.*", "", text)          # 주석 제거
     text = text.replace("\x00PCT\x00", "%")
     text = text.replace("&=", "= &")          # align 정렬점 보정
+    text = replace_phantom(text)              # \phantom / 속 빈 \boxed
 
     text = normalize_arguments(text)
     text = replace_environments(text)
@@ -619,19 +697,25 @@ def convert(latex: str) -> str:
     text = replace_two_group_command(text, r"\underset", "{{{b}}} _{{{a}}}")
     text = replace_sqrt(text)
 
-    text = replace_one_atom_command(text, r"\overrightarrow", "vec {", "}")
-    text = replace_one_atom_command(text, r"\vec", "vec {", "}")
-    text = replace_one_atom_command(text, r"\overline", "bar {", "}")
-    text = replace_one_atom_command(text, r"\bar", "bar {", "}")
-    text = replace_one_atom_command(text, r"\underline", "under {", "}")
-    text = replace_one_atom_command(text, r"\widehat", "hat {", "}")
-    text = replace_one_atom_command(text, r"\hat", "hat {", "}")
-    text = replace_one_atom_command(text, r"\tilde", "tilde {", "}")
-    text = replace_one_atom_command(text, r"\dot", "dot {", "}")
-    text = replace_one_atom_command(text, r"\ddot", "ddot {", "}")
+    # 예: \overline{AB}^2 -> {bar {AB}}^2 : 감싸지 않으면 윗줄이 뒤 식 전체로 번진다 (9/25 실측)
+    text = replace_one_atom_command(text, r"\overrightarrow", "{vec {", "}}")
+    text = replace_one_atom_command(text, r"\vec", "{vec {", "}}")
+    text = replace_one_atom_command(text, r"\overline", "{bar {", "}}")
+    text = replace_one_atom_command(text, r"\bar", "{bar {", "}}")
+    text = replace_one_atom_command(text, r"\underline", "{under {", "}}")
+    text = replace_one_atom_command(text, r"\widehat", "{hat {", "}}")
+    text = replace_one_atom_command(text, r"\hat", "{hat {", "}}")
+    text = replace_one_atom_command(text, r"\widetilde", "{tilde {", "}}")
+    text = replace_one_atom_command(text, r"\tilde", "{tilde {", "}}")
+    text = replace_one_atom_command(text, r"\dot", "{dot {", "}}")
+    text = replace_one_atom_command(text, r"\ddot", "{ddot {", "}}")
     text = replace_mathcal(text)   # 한글에 cal 없음 -> bold (9/9 실측)
     text = replace_mathbb(text)    # 이중선체 -> VecN (9/9 실측, 대문자 V, 중괄호 없이)
     text = replace_one_atom_command(text, r"\mathbf", "bold ", "")
+    text = replace_one_atom_command(text, r"\boldsymbol", "bold ", "")   # \boldsymbol{a} -> bold a
+    text = replace_one_atom_command(text, r"\bm", "bold ", "")
+    text = replace_one_atom_command(text, r"\mathsf", "", "")
+    text = replace_one_atom_command(text, r"\mathscr", "bold ", "")
     text = replace_bold_text(text)                                    # 수식 안 굵은 라벨/표 머리글
     text = replace_one_atom_command(text, r"\mathit", "italic ", "")
     text = replace_one_atom_command(text, r"\textit", "italic ", "")
@@ -667,7 +751,16 @@ def latex_to_hwp_equation(latex: str) -> str:
     """
     _BLANK_LABELS.clear()
     try:
-        return convert(latex)
+        text = convert(latex)
+        # 프라임 앞에 작은 공백: S' -> S`'  (첨자가 글자에 너무 붙어 보여서, 9/17 요청)
+        # 따옴표 문자열("...") 안은 건드리지 않는다
+        parts = text.split('"')
+        for i in range(0, len(parts), 2):
+            parts[i] = re.sub(r"(?<=[A-Za-z0-9)\]}])(?<!`)'", "`'", parts[i])
+            # '<-' 는 한글이 화살표(←)로 읽는다. 부등호+음수(x<-1)는 사이를 띄운다.
+            # '>-' 도 같은 이유로 띄운다 (>- 는 화살표가 아니지만 보기에 붙어 어색).
+            parts[i] = re.sub(r"(?<![<>=-])([<>])\s*-(?=\s*[\d.({\\A-Za-z])", r"\1 -", parts[i])
+        return '"'.join(parts)
     except Exception as error:
         UNSUPPORTED.append(f"[변환실패] {type(error).__name__}")
         fallback = re.sub(r"\\[A-Za-z]+", " ", latex)
