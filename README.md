@@ -125,6 +125,8 @@ python src/make_hwp_from_txt.py -i 원고_dsl.txt -o 원고.hwp
 | `--append` | `-o` 파일이 이미 있으면 그 끝에 이어 붙임 |
 | `--template style.hwp` | 서식 파일에 이어서 작성 |
 | `--visible` | 한글 창을 보이게 (디버깅용, 기본은 숨김) |
+| `--img-height-mm N` | `IMG:`에서 높이를 생략했을 때 사용할 그림 높이(mm). 기본값 23. 개별 `IMG:`에 높이를 쓰면 그 값이 우선 |
+| `--image-dir 경로` | `IMG:`에 적힌 상대 경로를 찾을 기준 폴더. 생략하면 명령을 실행한 현재 작업 폴더 기준 |
 
 ### 4. 합치기 (윈도우 + 한글)
 
@@ -193,21 +195,24 @@ python src/latex_to_hwp.py --selftest
 | `FIX: 메모` | 작업 메모. 문서에 들어가지 않음 |
 | `NEWPAGE:` | 쪽 나누기 |
 
-손으로 DSL 을 다듬을 때 추가로 쓸 수 있는 것: `IMG: 경로 | 폭mm`, `FIG: 번호 | 설명 | 70x50`(자리표시자), `EQALIGN:` … `END:`(여러 줄 수식), `ALIGN:`, `INDENT: left=10 first=-10`, `SOURCE:`, `ANS:`, `UNSURE:`. 모르는 명령은 건너뛰고 마지막에 개수를 출력합니다.
+손으로 DSL을 다듬을 때 추가로 사용할 수 있는 명령:
 
-예:
+* `IMG: 경로 | 높이(mm)` — 그림의 높이를 지정하고, 원본 이미지의 가로·세로 비율로 너비를 계산합니다. 높이를 생략하면 `--img-height-mm` 값(기본 23)을 사용합니다.
+* `FIG: 번호 | 설명 | 70x50` — 실제 이미지가 없을 때 사용하는 그림 자리표시자. `70x50`은 너비×높이(mm)입니다.
+* `RAWEQ: 한글 수식 스크립트` — LaTeX 변환을 거치지 않고 한글 수식 스크립트를 직접 삽입합니다. 표기 확인용으로 사용할 수 있습니다.
+* `GOTO_END: N` — 기존 hwp의 N번 문항 본문 마지막 문단 끝으로 이동합니다. `--attach`와 함께 사용합니다.
+* `EQALIGN:` … `END:` — 여러 줄 수식
+* `ALIGN:`, `INDENT: left=10 first=-10`, `SOURCE:`, `ANS:`, `UNSURE:`
 
+그림 높이에는 단위 없이 숫자만 입력합니다.
+
+```text
+IMG: figure.png | 30
 ```
-PROB: 예제 3-1. 연의 총수
-TEXT: 두 종류의 문자
-EQ: a,b
-TEXT: 를 사용하여 …
-BR:
-EQD: n>m\ge2
-SOL:
-TEXT: 첫 번째 방법 …
-ENDSOL:
-```
+
+위 명령은 높이를 30으로 지정하고, 원본 이미지 비율에 따라 너비를 계산합니다. `--image-dir images`를 사용했다면 `images/figure.png`를 찾습니다.
+
+모르는 DSL 명령은 건너뛰고 마지막에 개수를 출력합니다.
 
 ## 라이선스
 
