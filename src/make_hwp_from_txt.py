@@ -13,7 +13,7 @@ DSL 명령
     BR:                       문단 나누기
     ALIGN: center             이후 문단 정렬 (left/center/right/justify/distribute)
     INDENT: left=10 first=-10 문단 왼쪽 여백 / 첫 줄 들여쓰기 (mm)
-    IMG: 경로 | 폭mm          그림 삽입 (실제 이미지)
+    IMG: 경로 | 높이(mm)      그림 삽입 (높이 지정, 원본 비율로 너비 계산)
     FIG: 번호 | 설명 | 폭mm   그림 자리표시자 (아직 이미지가 없을 때)
     NEWPAGE:                  쪽 나누기
     SPACE:                    공백 한 칸 (구버전 호환)
