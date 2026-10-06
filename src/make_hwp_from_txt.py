@@ -277,9 +277,9 @@ def try_set(obj, name, value) -> None:
         pass
 
 
-def insert_equation(hwp, source: str, verbose: bool = False) -> None:
-    script = latex_to_hwp_equation(source)
-    missing = pop_unsupported()
+def insert_equation(hwp, source: str, verbose: bool = False, raw: bool = False) -> None:
+    script = source if raw else latex_to_hwp_equation(source)
+    missing = [] if raw else pop_unsupported()
     if missing:
         UNSUPPORTED_TOTAL.update(missing)
         print(f"[미지원] {sorted(set(missing))}  <-  {source[:60]}")
@@ -434,23 +434,57 @@ def read_paragraph_head(hwp, para: int, length: int = 12):
     return text[:length] if text is not None else None
 
 
+def insert_picture(hwp, image: Path, height_mm: float) -> None:
+    """그림을 '글자처럼 취급' 으로 현재 위치에 넣는다. 세로 height_mm, 가로는 비율대로.
+
+    InsertPicture(Path, Embedded, sizeoption, Reverse, watermark, Effect, Width, Height)
+      sizeoption=1 : Width/Height(mm) 로 크기 지정.   (9/10 기준 실측 전 — 샘플로 확인할 것)
+    """
+    try:
+        from PIL import Image
+        with Image.open(image) as im:
+            ratio = im.width / im.height
+    except Exception:
+        ratio = 1.0
+    width_mm = height_mm * ratio
+    ctrl = hwp.InsertPicture(str(image), True, 1, False, False, 0, width_mm, height_mm)
+    try:
+        props = ctrl.Properties
+        props.SetItem("TreatAsChar", True)
+        ctrl.Properties = props
+    except Exception:
+        print(f"[경고] 그림 '글자처럼 취급' 설정 실패: {image.name} (문단 정렬이 안 먹을 수 있음)")
+
+
 def build_goto_map(path) -> dict:
     """기존 hwp 를 한글 없이 읽어 {'12': (문단번호, 'N.' 뒤 위치, '12.')} 를 만든다."""
     import re as _re
     import hwp_read
     result = {}
-    for k, text in enumerate(hwp_read.paragraphs(str(path))):
+    paras = hwp_read.paragraphs(str(path))
+    heads = []
+    for k, text in enumerate(paras):
         m = _re.match(r"^(\s*)(\d{1,3})\.(\s|$)", text)
         if m and m.group(2) not in result:
             number = m.group(2)
-            result[number] = (k, len(m.group(1)) + len(number) + 1, number + ".")
-    return result
+            result[number] = [k, len(m.group(1)) + len(number) + 1, number + ".", k]
+            heads.append((k, number))
+    # 각 문제의 '마지막 내용 문단' = 다음 문제 헤더 앞의 마지막 비어있지 않은 문단 (그림은 그 뒤에 붙인다)
+    for i, (k, number) in enumerate(heads):
+        end = heads[i + 1][0] if i + 1 < len(heads) else len(paras)
+        last = k
+        for j in range(k, end):
+            if paras[j].strip():
+                last = j
+        result[number][3] = last
+    return {n: tuple(v) for n, v in result.items()}
 
 
 def build(hwp, lines: list[str], verbose: bool, default_align: str,
           auto_space: bool = True, solutions: str = "endnote",
           progress: int = 200, prob_gap: int = 3,
-          goto_map: dict | None = None) -> None:
+          goto_map: dict | None = None, img_height_mm: float = 23.0,
+          image_dir: Path | None = None) -> None:
     body_align = default_align
     problems_done = 0
     goto_map = goto_map or {}
@@ -561,6 +595,43 @@ def build(hwp, lines: list[str], verbose: bool, default_align: str,
             last_char = ""; pending_eq = False; index += 1
             continue
 
+        if line.startswith("GOTO_END:"):
+            # 기존 문서의 N번 문항 본문 마지막 문단 끝으로 (그림은 여기 뒤에 새 문단으로 들어간다)
+            if in_endnote is not None:
+                set_bold(hwp, False)
+                close_endnote(hwp, in_endnote)
+                in_endnote = None
+            number = line[len("GOTO_END:"):].strip()
+            if number not in goto_map:
+                raise RuntimeError(f"GOTO_END: {number} — 기존 문서에서 '{number}.' 문항을 못 찾음")
+            para, pos, expect, last = goto_map[number]
+            head = read_paragraph_head(hwp, para)
+            if head is not None and not head.lstrip().startswith(expect):
+                raise RuntimeError(f"GOTO_END: {number} — {para}번 문단이 '{expect}' 로 시작하지 않음: {head[:40]!r}")
+            hwp.SetPos(0, last, 0)
+            hwp.HAction.Run("MoveParaEnd")
+            if verbose:
+                print(f"  GOTO_END {number}: 문단 {last} 끝")
+            last_char = ""; pending_eq = False; index += 1
+            continue
+
+        if line.startswith("IMG:"):
+            # IMG: 파일경로 [| 세로 mm]   -> 가운데 정렬된 새 문단에, 비율 유지, 세로 길이 고정
+            parts = [x.strip() for x in line[len("IMG:"):].split("|")]
+            image = Path(parts[0])
+            height_mm = float(parts[1]) if len(parts) > 1 and parts[1] else img_height_mm
+            if not image.is_absolute():
+                image = (image_dir / image) if image_dir else image.resolve()
+            if not image.exists():
+                raise RuntimeError(f"IMG: 파일 없음 {image}")
+            hwp.HAction.Run("BreakPara")
+            set_align(hwp, "center")
+            insert_picture(hwp, image, height_mm)
+            hwp.HAction.Run("BreakPara")
+            set_align(hwp, body_align)
+            last_char = ""; pending_eq = False; index += 1
+            continue
+
         if line.startswith("GOTO:"):
             # 기존 문서의 'N.' 문항 헤더 바로 뒤로 커서 이동 (--attach 모드)
             if in_endnote is not None:
@@ -570,7 +641,7 @@ def build(hwp, lines: list[str], verbose: bool, default_align: str,
             number = line[len("GOTO:"):].strip()
             if number not in goto_map:
                 raise RuntimeError(f"GOTO: {number} — 기존 문서에서 '{number}.' 로 시작하는 문단을 못 찾음")
-            para, pos, expect = goto_map[number]
+            para, pos, expect, _last = goto_map[number]
             hwp.SetPos(0, para, pos)
             got = tuple(hwp.GetPos())
             if got[:2] != (0, para):
@@ -679,6 +750,12 @@ def build(hwp, lines: list[str], verbose: bool, default_align: str,
             index += 1
             continue
 
+        if line.startswith("RAWEQ:"):
+            # 한글 수식 스크립트를 변환 없이 그대로 넣는다 (표기 실험용)
+            insert_equation(hwp, line[len("RAWEQ:"):].strip(), verbose, raw=True)
+            last_char = ""; pending_eq = True; index += 1
+            continue
+
         if line.startswith("EQ:"):
             if auto_space and last_char and last_char not in NO_SPACE_BEFORE:
                 insert_text(hwp, " ")
@@ -755,6 +832,10 @@ def main() -> None:
                         help="본문과 인라인 수식 사이 공백 자동 삽입을 끈다")
     parser.add_argument("--attach", type=Path,
                         help="기존 hwp 를 열어 그 안의 'N.' 문항에 GOTO:/SOL: 로 미주를 붙인다 (-o 는 다른 이름)")
+    parser.add_argument("--img-height-mm", type=float, default=23.0,
+                        help="IMG: 그림의 세로 길이(mm). 본문 4줄 ≈ 23mm (10pt, 줄간격 160%% 기준)")
+    parser.add_argument("--image-dir", type=Path, default=None,
+                        help="IMG: 의 상대 경로를 이 폴더 기준으로 찾는다")
     parser.add_argument("--prob-gap", type=int, default=3,
                         help="문제와 문제 사이 엔터 횟수 (기본 3)")
     parser.add_argument("--invisible", action="store_true", default=True,
@@ -799,7 +880,9 @@ def main() -> None:
         set_align(hwp, args.align)
         build(hwp, lines, args.verbose, args.align,
               not args.no_auto_space, args.solutions, args.progress,
-              prob_gap=args.prob_gap, goto_map=goto_map)
+              prob_gap=args.prob_gap, goto_map=goto_map,
+              img_height_mm=args.img_height_mm,
+              image_dir=args.image_dir.resolve() if args.image_dir else None)
         hwp.HAction.Run("MoveDocEnd")
         hwp.SaveAs(str(output), "HWP")
         if output.exists():
