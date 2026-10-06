@@ -35,7 +35,8 @@ from pathlib import Path
 
 # 헤더. 닫는 중괄호 뒤에 다른 내용이 붙는 경우가 있으므로 줄 끝 앵커를 걸지 않는다.
 # (예: \noindent\textbf{예제 3-9. 평면에서의 색칠} [그림 필요: ...])
-HEADER = re.compile(r"^\\noindent\\textbf\{")
+HEADER = re.compile(r"^(?:\\medskip\s*|\\bigskip\s*|\\smallskip\s*|\\noindent\s*)*\\textbf\{")
+SECTION = re.compile(r"^\\(?:section|subsection|subsubsection|paragraph|chapter)\*?\{")
 
 DISPLAY = re.compile(r"(?<!\\)\\\[(.*?)(?<!\\)\\\]", re.S)
 INLINE = re.compile(r"(?<!\\)\\\((.*?)(?<!\\)\\\)", re.S)
@@ -78,7 +79,7 @@ TEXT_COMMANDS = {
 }
 
 # {...} 인자를 하나 받고 내용만 남기는 본문 명령
-UNWRAP_ONE = ("textbf", "textit", "emph", "text", "mbox", "underline", "textrm")
+UNWRAP_ONE = ("textbf", "textit", "emph", "text", "mbox", "underline", "textrm", "textup", "textsc", "texttt", "textnormal", "textsf", "textmd")
 
 UNKNOWN_TEXT_COMMANDS: Counter = Counter()
 UNRENDERED_HEADINGS: list[str] = []
@@ -86,6 +87,7 @@ UNRENDERED_HEADINGS: list[str] = []
 # 제목 줄 안의 수식은 EQ: 로 뺄 수 없다 (PROB: 은 한 줄짜리 굵은 글씨 한 덩어리).
 # 다행히 제목에 쓰인 수식은 변수 이름과 곱셈 기호 수준이라 유니코드로 그대로 쓴다.
 HEADING_MATH = {
+    r"\leq": "≤", r"\geq": "≥", r"\neq": "≠",
     r"\times": "×", r"\cdot": "·", r"\ldots": "…", r"\cdots": "…",
     r"\dots": "…", r"\quad": " ", r"\qquad": " ", r"\,": "", r"\;": "",
     r"\le": "≤", r"\ge": "≥", r"\ne": "≠", r"\pm": "±",
@@ -203,6 +205,7 @@ def convert_tags(body: str) -> str:
 
 
 ITEM_STACK: list = []
+DEFAULT_ENUM_STYLE = "num"
 
 
 def number_items(run: str) -> str:
@@ -211,20 +214,42 @@ def number_items(run: str) -> str:
     out = []
     stack = ITEM_STACK    # 문단이 갈려도 (항목 안에 디스플레이 수식이 있으면 문단이 나뉜다) 번호가 이어지도록 전역
     pos = 0
-    token = re.compile(r"\\begin\{(enumerate|itemize)\}|\\end\{(enumerate|itemize)\}|\\item\s*(?:\[([^\]]*)\])?\s*")
+    token = re.compile(r"\\begin\{(enumerate|itemize)\}(?:\s*\[(.*?)\](?!\}))?|\\end\{(enumerate|itemize)\}|\\item\s*(?:\[([^\]]*)\])?\s*")
     for m in token.finditer(run):
         out.append(run[pos:m.start()])
         pos = m.end()
         if m.group(1):
-            stack.append([m.group(1), 0]); out.append("\x00BR\x00")
-        elif m.group(2):
+            style = DEFAULT_ENUM_STYLE
+            opt = m.group(2) or ""
+            tmpl = None
+            lm = re.search(r"label\s*=\s*(.+?)(?:,\s*[a-z]+\s*=|$)", opt)
+            if lm:
+                tmpl = re.sub(r"\\(?:textbf|bfseries|textit|emph|rm|sf)\s*", "", lm.group(1)).strip()
+                tmpl = tmpl[1:-1].strip() if tmpl.startswith("{") and tmpl.endswith("}") else tmpl
+                if not re.search(r"\\(?:arabic|alph|Alph|roman|Roman)\*", tmpl):
+                    tmpl = None
+            if "alph" in opt: style = "alph"
+            elif "roman" in opt: style = "roman"
+            stack.append([m.group(1), 0, style, tmpl]); out.append("\x00BR\x00")
+        elif m.group(3):
             if stack: stack.pop()
             out.append("\x00BR\x00")
         else:
-            if m.group(3) is not None:
-                label = m.group(3)
+            if m.group(4) is not None:
+                label = m.group(4)
             elif stack and stack[-1][0] == "enumerate":
-                stack[-1][1] += 1; label = f"({stack[-1][1]})"
+                stack[-1][1] += 1; k = stack[-1][1]
+                st = stack[-1][2] if len(stack[-1]) > 2 else "num"
+                tmpl = stack[-1][3] if len(stack[-1]) > 3 else None
+                roman = ['i','ii','iii','iv','v','vi','vii','viii','ix','x']
+                if tmpl:      # label=\textbf{1-\arabic*.} 같은 사용자 템플릿
+                    label = tmpl
+                    for pat, val in ((r"\\arabic\*", str(k)), (r"\\alph\*", chr(96 + k)), (r"\\Alph\*", chr(64 + k)),
+                                     (r"\\roman\*", roman[k - 1] if k <= 10 else str(k)), (r"\\Roman\*", (roman[k - 1] if k <= 10 else str(k)).upper())):
+                        label = re.sub(pat, val, label)
+                    label = label.replace("{", "").replace("}", "")
+                else:
+                    label = f"({k})" if st == "num" else (f"({chr(96 + k)})" if st == "alph" else f"({roman[k-1]})")
             else:
                 label = "·"
             out.append("\x00BR\x00" + label + " ")
@@ -234,14 +259,14 @@ def number_items(run: str) -> str:
 
 def emit_text_run(run: str, out: list[str], inlines: list[str]) -> None:
     """본문 덩어리 하나를 TEXT:/EQ:/EQD:/BR: 줄들로 바꿔 out 에 넣는다."""
+    run = number_items(run)          # enumerate 옵션의 \textbf 가 벗겨지기 전에 먼저 (라벨 템플릿 보존)
     run = unwrap_commands(run)
 
     # 남은 본문 명령 치환
     for name, value in TEXT_COMMANDS.items():
         run = run.replace(name, value)
 
-    run = number_items(run)
-
+    run = re.sub(r"\\\\(\[[^\]]*\])?", "\x00BR\x00", run)      # 본문 강제 줄바꿈
     run = run.replace("--", "–")
 
     # 처리하지 못한 명령 수집 후 제거
@@ -263,7 +288,7 @@ def emit_text_run(run: str, out: list[str], inlines: list[str]) -> None:
             out.append("EQ: " + inlines[int(EQ_TOKEN_RE.fullmatch(piece).group(1))])
         else:
             # 원문의 줄바꿈은 LaTeX 에서 공백 한 칸이다 (490군데 모두 어절 경계).
-            piece = re.sub(r"\s+", " ", piece)
+            piece = re.sub(r"\s+", " ", piece).replace("{", "").replace("}", "")
             if piece.strip():
                 out.append("TEXT: " + piece.strip())
 
@@ -316,6 +341,313 @@ def normalize_top_level_environments(source: str) -> str:
         return "\\[\n\\begin{" + inner + "}" + body + "\\end{" + inner + "}\n\\]"
     return re.sub(r"\\begin\{(align\*?|gather\*?|equation\*?|multline\*?)\}(.*?)\\end\{\1\}",
                   wrap, source, flags=re.S)
+
+
+def substitute_args(bodytxt: str, args: list[str]) -> str:
+    r"""매크로 본문의 #1,#2... 를 인자로 바꾼다.
+
+    TeX 는 토큰 단위로 끼워 넣으므로 \left\lVert#1\right\rVert 에 N 을 넣으면 \lVert 와 N 은 따로다.
+    문자열로 그냥 이어 붙이면 \lVertN 이라는 없는 명령이 되므로, 필요한 자리에 공백을 넣는다.
+    """
+    pieces = re.split(r"#(\d)", bodytxt)
+    out = pieces[0]
+    for k in range(1, len(pieces), 2):
+        index = int(pieces[k]) - 1
+        arg = args[index] if 0 <= index < len(args) else ""
+        tail = pieces[k + 1] if k + 1 < len(pieces) else ""
+        if arg and arg[0].isalpha() and re.search(r"\\[A-Za-z]+$", out):
+            out += " "
+        out += arg
+        if tail[:1].isalpha() and re.search(r"\\[A-Za-z]+$", out):
+            out += " "
+        out += tail
+    return out
+
+
+IFNUM = re.compile(r"\\ifnum\s*(-?\d+)\s*(=|<|>)\s*(-?\d+)\s*"
+                   r"((?:(?!\\ifnum|\\else|\\fi).)*)"
+                   r"(?:\\else((?:(?!\\ifnum|\\fi).)*))?\\fi", re.S)
+
+
+def resolve_ifnum(body: str) -> str:
+    r"""매크로를 전개한 뒤 남는 \ifnum 16=16 ... \else ... \fi 를 실제로 판정한다 (중첩 없는 단순형)."""
+    for _ in range(20):
+        new = IFNUM.sub(lambda m: (m.group(4) if {"=": m.group(1) == m.group(3),
+                                                  "<": int(m.group(1)) < int(m.group(3)),
+                                                  ">": int(m.group(1)) > int(m.group(3))}[m.group(2)]
+                                   else (m.group(5) or "")), body)
+        if new == body:
+            break
+        body = new
+    return body
+
+
+STAR_RATING = re.compile(r"\\foreach\s*\\[A-Za-z]+\s*in\s*\{\s*1\s*,\s*\.\.\.\s*,\s*(\d+)\s*\}.*?\\ifnum\s*\\[A-Za-z]+\s*>\s*#1", re.S)
+
+
+def expand_macros(full_source: str, body: str) -> str:
+    r"""프리앰블의 \newcommand{\X}[n]{...} / \newcommand{\X}{...} 를 본문에서 문자 치환으로 전개."""
+    macros = []
+    star_macros: dict[str, int] = {}
+    # \input{…} 로 불러오는 프리앰블이 없을 때를 대비한 흔한 기본 매크로 (문서에 정의가 있으면 그쪽이 우선)
+    defined = set(re.findall(r"\\(?:re)?newcommand\{\\([A-Za-z]+)\}|\\DeclareMathOperator\*?\{\\([A-Za-z]+)\}", full_source))
+    defined = {a or b for a, b in defined}
+    for name, rep in (("R", "\\mathbb{R}"), ("N", "\\mathbb{N}"), ("Z", "\\mathbb{Z}"), ("Q", "\\mathbb{Q}"), ("C", "\\mathbb{C}")):
+        if name not in defined and re.search(r"\\" + name + r"(?![A-Za-z])", body):
+            macros.append((name, 0, rep))
+    for m in re.finditer(r"\\DeclareMathOperator\*?\{\\([A-Za-z]+)\}\{([^{}]*)\}", full_source):
+        macros.append((m.group(1), 0, "\\operatorname{" + m.group(2) + "}"))
+    for m in re.finditer(r"\\(?:re)?newcommand\{\\([A-Za-z]+)\}(?:\[(\d)\])?\{", full_source):
+        name, nargs = m.group(1), int(m.group(2) or 0)
+        bodytxt, _ = take_braced(full_source, m.end() - 1)
+        # 매크로 본문 줄 끝의 '%' 는 줄바꿈을 먹는 주석이다 (전개한 뒤에는 주석 제거가 끝나 있으므로 여기서 지운다)
+        bodytxt = re.sub(r"(?<!\\)%[^\n]*\n[ \t]*", "", bodytxt)
+        bodytxt = re.sub(r"(?<!\\)%[^\n]*$", "", bodytxt)
+        star = STAR_RATING.search(bodytxt) if "tikzpicture" in bodytxt else None
+        if star and nargs == 1:
+            # 별점 그림(\foreach \i in {1,...,5} ... \ifnum \i > #1)은 ★☆ 글자로 그린다
+            star_macros[name] = int(star.group(1))
+            continue
+        macros.append((name, nargs, bodytxt))
+    # 이름이 긴 것부터 (\\Range 와 \\R 구분)
+    for name, nargs, bodytxt in sorted(macros, key=lambda t: -len(t[0])):
+        pat = re.compile(r"\\" + name + r"(?![A-Za-z])")
+        pos = 0
+        while True:
+            m = pat.search(body, pos)
+            if not m:
+                break
+            args = []; end = m.end()
+            for _ in range(nargs):
+                while end < len(body) and body[end] in " \t": end += 1
+                if end < len(body) and body[end] == "{":
+                    a, end = take_braced(body, end); args.append(a)
+                elif end < len(body) and body[end] == "\\":
+                    # \norm A 처럼 중괄호 없이 한 토큰만 주는 TeX 관례
+                    tok = re.match(r"\\[A-Za-z]+|\\.", body[end:])
+                    args.append(tok.group(0)); end += tok.end()
+                elif end < len(body) and body[end] not in "\n}]&$%":
+                    args.append(body[end]); end += 1
+                else:
+                    args.append("")
+            rep = substitute_args(bodytxt, args)
+            body = body[:m.start()] + rep + body[end:]
+            pos = m.start() + len(rep)
+    for name, total in star_macros.items():
+        def stars(m, total=total):
+            try: filled = max(0, min(total, int(m.group(1).strip())))
+            except ValueError: return ""
+            return "★" * filled + "☆" * (total - filled)
+        body = re.sub(r"\\" + name + r"(?![A-Za-z])\s*\{([^{}]*)\}", stars, body)
+    if star_macros:   # '$★★☆☆☆$' 처럼 수식으로 감싸져 있으면 수식 표시를 벗긴다
+        body = re.sub(r"(?<!\\)\$\s*([★☆]+)\s*\$", r"\1", body)
+        body = re.sub(r"\\\(\s*([★☆]+)\s*\\\)", r"\1", body)
+    body = resolve_ifnum(body)
+    # \newenvironment{problem}[1][]{...} 류: \begin{problem}[옵션] -> 'Problem N. (옵션)' 헤더로
+    env_names = re.findall(r"\\newenvironment\{([A-Za-z]+)\}", full_source)
+    for name in ("problem", "solution", "exercise", "example"):
+        if name not in env_names and re.search(r"\\begin\{" + name + r"\}", body):
+            env_names.append(name)
+    env_counters: dict[str, int] = {}
+    for name in env_names:
+        word = {"problem": "Problem", "solution": "Solution", "exercise": "Problem", "example": "Example",
+                "proof": "Proof", "theorem": "Theorem", "lemma": "Lemma", "remark": "Remark"}.get(name.lower(), name.capitalize())
+        def begin(m, word=word, name=name):
+            env_counters[name] = env_counters.get(name, 0) + 1
+            opt = (" (" + m.group(1).strip() + ")") if m.group(1) else ""
+            return "\n\n\\noindent\\textbf{" + word + " " + str(env_counters[name]) + "." + opt + "}\n"
+        body = re.sub(r"\\begin\{" + name + r"\}(?:\[([^\]]*)\])?", begin, body)
+        body = re.sub(r"\\end\{" + name + r"\}", "\n\n", body)
+    # \refstepcounter{prob} ... \theprob : 매크로로 번호를 자동 매기는 문서 (Putnam 파일)
+    counters: dict[str, int] = {}
+    def step(m):
+        counters[m.group(1)] = counters.get(m.group(1), 0) + 1; return ""
+    def the(m):
+        return str(counters.get(m.group(1), 0))
+    names = set(re.findall(r"\\(?:newcounter|refstepcounter|stepcounter)\{([A-Za-z]+)\}", full_source + body))
+    if not names:
+        return re.sub(r"\\par(?![A-Za-z])", "\n\n", body)
+    out = []; pos = 0
+    # \theta 같은 명령과 섞이지 않게, 선언된 카운터 이름만 \the<name> 으로 인식
+    for m in re.finditer(r"\\(?:refstepcounter|stepcounter)\{([A-Za-z]+)\}|\\the(" + "|".join(sorted(names, key=len, reverse=True)) + r")(?![A-Za-z])", body):
+        out.append(body[pos:m.start()])
+        if m.group(1): step(m)
+        else: out.append(str(counters.get(m.group(2), 0)))
+        pos = m.end()
+    out.append(body[pos:]); body = "".join(out)
+    body = re.sub(r"\\par(?![A-Za-z])", "\n\n", body)
+    return body
+
+
+# 인자 두 개를 받는 조판 명령 (두 번째 {} 까지 지운다)
+LAYOUT_CMDS2 = re.compile(r"\\(?:setlength|setcounter|addtocounter|pdfbookmark|bookmark|hypertarget|markboth)(?:\[[^\[\]]*\])?\{[^{}]*\}\{[^{}]*\}")
+# 인자 한 개를 받는 조판 명령
+LAYOUT_CMDS = re.compile(r"\\(?:vspace\*?|hspace\*?|addvspace|Needspace\*?|needspace|label|pagestyle|thispagestyle|enlargethispage|typeout|markright)(?:\[[^\[\]]*\])?\{[^{}]*\}")
+# 인자 없이 쓰는 조판 명령 (지워도 본문이 달라지지 않는 것)
+BARE_LAYOUT_CMDS = re.compile(r"\\(?:hrule|hrulefill|hfill|vfill|null|thepage|phantomsection|ignorespaces|nobreak|begingroup|endgroup|bgroup|egroup|relax|leavevmode)(?![A-Za-z])")
+# \hangindent=2em, \hangafter=1 같은 TeX 치수/숫자 대입
+TEX_ASSIGN = re.compile(r"\\(?:hangindent|hangafter|parindent|parskip|baselineskip|lineskip|leftskip|rightskip|hsize|vsize|hoffset|voffset|looseness|clubpenalty|widowpenalty)\s*=?\s*-?[\d.]*\s*(?:em|ex|pt|mm|cm|in|sp|bp|dd|pc)?\s*(?:plus[^\\\n]*)?")
+# \makebox[2em][l]{(1)} / \raisebox{..}{X} / \parbox[t]{..}{X} : 내용만 남긴다
+BOX_CMDS = re.compile(r"\\(?:makebox|framebox|mbox|fbox|raisebox|parbox|resizebox|scalebox|hbox|vbox)\s*(?:\[[^\[\]]*\]|\{[-\d.]*\s*(?:em|ex|pt|mm|cm|in)?\})*\s*(?=\{)")
+SIZE_CMDS = re.compile(r"\\(?:Large|large|LARGE|huge|Huge|small|footnotesize|scriptsize|tiny|normalsize|bfseries|itshape|centering)\b")
+# '{\large\bfseries 제목}' 처럼 크기+굵게로만 만든 제목 (\section 을 안 쓰는 문서)
+TITLE_GROUP = re.compile(r"\{\s*((?:\\(?:large|Large|LARGE|huge|Huge|bfseries|sffamily|itshape)\s*){2,})")
+
+
+def promote_title_groups(body: str) -> str:
+    out = []; pos = 0
+    while True:
+        m = TITLE_GROUP.search(body, pos)
+        if not m:
+            break
+        prefix = m.group(1)
+        if not (re.search(r"large|Large|LARGE|huge|Huge", prefix) and "bfseries" in prefix):
+            out.append(body[pos:m.end()]); pos = m.end(); continue
+        try:
+            inner, end = take_braced(body, m.start())
+        except ValueError:
+            out.append(body[pos:m.end()]); pos = m.end(); continue
+        inner = SIZE_CMDS.sub("", inner).strip()
+        if not inner or "\n\n" in inner:          # 제목 한 줄이 아니면 건드리지 않는다
+            out.append(body[pos:end]); pos = end; continue
+        out.append(body[pos:m.start()])
+        # \textbf 헤더로 넘겨 준다: 번호가 붙어 있으면 뒤에서 문제/해설 헤더로, 아니면 절 제목으로 처리된다
+        out.append("\n\n\\textbf{" + inner + "}\n\n")
+        pos = end
+    out.append(body[pos:])
+    return "".join(out)
+
+
+SECTION_CMD = re.compile(r"\\(?:sub){0,2}section\*?\s*(?=\{)|\\(?:chapter|part|paragraph|subparagraph)\*?\s*(?=\{)")
+
+
+def isolate_sections(body: str) -> str:
+    r"""\section*{...} 을 반드시 한 줄로 떼어 놓는다.
+
+    매크로를 전개하면 '\clearpage\section*{문제 1-(2)}' 처럼 줄 중간에 붙어 나오는데,
+    절 제목은 줄 머리에서만 알아보기 때문에 그대로 두면 본문 글자로 섞여 버린다.
+    """
+    out = []; pos = 0
+    while True:
+        m = SECTION_CMD.search(body, pos)
+        if not m:
+            break
+        try:
+            inner, end = take_braced(body, m.end())
+        except ValueError:
+            pos = m.end(); continue
+        out.append(body[pos:m.start()])
+        out.append("\n\n" + m.group(0).strip() + "{" + inner + "}\n\n")
+        pos = end
+    out.append(body[pos:])
+    return "".join(out)
+
+
+def normalize_layout(body: str) -> str:
+    # 줄 머리의 '{\large\textbf{제목}}' 류 -> 절 제목
+    body = re.sub(r"(?m)^\s*\{\s*\\(?:large|Large|LARGE|huge|Huge)\s*\\(?:textbf|bfseries)\s*\{(.*)\}\s*\}\s*(\\\\)?\s*$",
+                  lambda m: "\n\\section*{" + m.group(1) + "}\n", body)
+    # 글을 감싸기만 하는 환경 (quote, minipage ...) 은 문단 구분으로 바꾼다
+    body = re.sub(r"\\(?:begin|end)\{(?:quote|quotation|verse|flushleft|flushright|minipage|multicols\*?|small|footnotesize|spacing|adjustwidth)\}"
+                  r"(?:\[[^\[\]]*\]|\{[^{}]*\})*", "\n\n", body)
+    # \hspace 는 지우되 자리에 공백을 남긴다 ('1번\hspace{.65em}★★☆☆☆' 가 붙지 않게).
+    # \quad 류는 수식 안에서 쓰이므로 여기서 건드리지 않는다.
+    body = protect_math_then(body, lambda t: re.sub(r"\\(?:hspace\*?|hskip)\s*(?:\{[^{}]*\}|[-\d.]+\s*(?:em|ex|pt|mm|cm|in))", " ", t))
+    body = LAYOUT_CMDS2.sub("", body)
+    body = LAYOUT_CMDS.sub("", body)
+    body = BOX_CMDS.sub("", body)          # \makebox[2em][l]{(1)} -> {(1)}
+    body = TEX_ASSIGN.sub("", body)
+    body = promote_title_groups(body)
+    body = BARE_LAYOUT_CMDS.sub("", body)
+    body = SIZE_CMDS.sub("", body)
+    # \begin{center} ... \end{center} : 줄마다 굵은 제목 줄로
+    def center(m):
+        inner = m.group(1).replace("\\\\", "\n")
+        inner = re.sub(r"\[[0-9.]+(?:em|mm|pt|cm)\]", "", inner)
+        lines = [l.strip() for l in inner.split("\n") if l.strip()]
+        return "\n\n" + "\n\n".join(l if l.startswith("\\section*{") else "\\section*{" + l + "}" for l in lines) + "\n\n"
+    body = re.sub(r"\\begin\{center\}(.*?)\\end\{center\}", center, body, flags=re.S)
+    return isolate_sections(body)
+
+
+def resolve_eqrefs(body: str) -> str:
+    r"""\eqref{lbl} -> (번호).  \tag{2.1}\label{lbl} 이면 (2.1), 그 밖에 equation 환경 안 \label 은 등장 순서로 (1),(2),..."""
+    numbers: dict[str, str] = {}
+    for m in re.finditer(r"\\tag\*?\{([^{}]*)\}\s*\\label\{([^{}]*)\}|\\label\{([^{}]*)\}\s*\\tag\*?\{([^{}]*)\}", body):
+        if m.group(1): numbers[m.group(2)] = m.group(1)
+        else: numbers[m.group(3)] = m.group(4)
+    k = 0
+    for m in re.finditer(r"\\begin\{equation\}(.*?)\\end\{equation\}", body, re.S):
+        k += 1
+        for lm in re.finditer(r"\\label\{([^{}]*)\}", m.group(1)):
+            numbers.setdefault(lm.group(1), str(k))
+    body = re.sub(r"\\eqref\{([^{}]*)\}", lambda m: "(" + numbers.get(m.group(1), "?") + ")", body)
+    body = re.sub(r"\\ref\{([^{}]*)\}", lambda m: numbers.get(m.group(1), "?"), body)
+    body = body.replace("\\tableofcontents", "")
+    return body
+
+
+ACCENTS = {"v": "\u030c", "'": "\u0301", "`": "\u0300", '"': "\u0308", "^": "\u0302", "~": "\u0303", "c": "\u0327", "=": "\u0304", "u": "\u0306", ".": "\u0307"}
+
+
+def normalize_text_mode(body: str) -> str:
+    """수식 밖 텍스트의 LaTeX 표기를 유니코드로: 악센트(\\v{c} \\'{c}), ``..'', ---, --, 그룹 크기명령."""
+    import unicodedata
+    def acc(m):
+        mark = ACCENTS.get(m.group(1)); ch = m.group(2) or m.group(3)
+        return unicodedata.normalize("NFC", ch + mark) if mark and ch else m.group(0)
+    body = re.sub(r"\\([vcu])\s*\{([A-Za-z])\}()", acc, body)                 # \v{c} : 중괄호 필수
+    body = re.sub(r"\\(['`\"^~=.])\s*(?:\{([A-Za-z])\}|([A-Za-z]))", acc, body)   # \'{c} 또는 \'c
+    body = body.replace("``", "\u201c").replace("''", "\u201d")
+    body = body.replace("---", "\u2014")
+    def circled(m):
+        c = m.group(1)
+        if c.isdigit() and c != "0": return chr(0x2460 + int(c) - 1)      # ①②③
+        if "a" <= c <= "z": return chr(0x24d0 + ord(c) - 97)             # ⓐⓑⓒ
+        if "A" <= c <= "Z": return chr(0x24b6 + ord(c) - 65)             # ⒜ 아님: Ⓐ
+        return c
+    body = re.sub(r"\\textcircled\s*\{\s*(?:\\[a-zA-Z]+\s*)?([0-9A-Za-z])\s*\}", circled, body)
+    return body
+
+
+def protect_math_then(body: str, fn) -> str:
+    """수식 부분은 건드리지 않고 나머지 텍스트에만 fn 적용."""
+    pat = re.compile(r"(\$\$.*?\$\$|\$.*?\$|\\\(.*?\\\)|\\\[.*?\\\]|\\begin\{(align\*?|aligned|equation\*?|gather\*?|array|pmatrix|bmatrix|vmatrix|cases)\}.*?\\end\{\2\})", re.S)
+    out = []; pos = 0
+    for m in pat.finditer(body):
+        out.append(fn(body[pos:m.start()])); out.append(m.group(0)); pos = m.end()
+    out.append(fn(body[pos:]))
+    return "".join(out)
+
+
+def strip_preamble(source: str) -> str:
+    r"""\documentclass … \begin{document} 프리앰블 블록을 (여러 개라도) 모두 제거한다.
+
+    \documentclass 앞에 본문 조각이 붙어 있거나, 여러 문서가 한 파일에 이어진 경우가 있어서
+    \begin{document} 앞을 통째로 버리지 않는다. 남은 \begin{document}/\end{document} 표시도 지운다.
+    """
+    while True:
+        start = source.find("\\documentclass")
+        if start == -1:
+            break
+        m = re.search(r"\\begin\{document\}", source[start:])
+        if m:
+            source = source[:start] + source[start + m.end():]
+            continue
+        # \begin{document} 가 없는 프리앰블: 프리앰블 성격의 줄만 걸러내고 본문은 남긴다
+        head, tail = source[:start], source[start:].split("\n")
+        keep, done = [], False
+        for line in tail:
+            if not done and (not line.strip()
+                             or re.match(r"\s*%", line)
+                             or re.match(r"\s*\\(?:documentclass|usepackage|RequirePackage|geometry|setmainfont|setsansfont|pagestyle|fancyhf|fancyhead|fancyfoot|linespread|setlist|setlength|hypersetup|author|date)\b", line)
+                             or re.match(r"\s*[a-z]+\s*=", line) or re.match(r"\s*\}\s*$", line)):
+                continue
+            done = True; keep.append(line)
+        source = head + "\n".join(keep)
+        break
+    source = re.sub(r"\\(?:begin|end)\{document\}", "", source)
+    return source
 
 
 def relabel(label: str, mode: str, counter: list[int]) -> tuple[str, str | None]:
@@ -385,11 +717,91 @@ def apply_xrefs(lines: list[str], mapping: list[tuple[str, str]]) -> tuple[list[
     return out, changed, unresolved
 
 
+def reorder_bound_solutions(out: list[str]) -> list[str]:
+    """'SOL@3' 해설 블록을 그 앞에 나온 가장 가까운 'PROB@3' 문제 블록 끝으로 옮긴다.
+    (같은 번호가 절마다 반복돼도 — Additional Problems 1~5 처럼 — 직전 것에 붙는다)"""
+    units = []; cur = None
+    for line in out:
+        if line.startswith(("PROB@", "PROB:", "SOL@")):
+            cur = [line]; units.append(cur)
+        elif cur is None:
+            units.append([line])
+        else:
+            cur.append(line)
+            if line == "ENDSOL:" and cur[0].startswith("SOL@"):
+                cur = []; units.append(cur)          # 해설이 닫힌 뒤 내용은 별도 단위 (절 제목 등)
+    has_problem = any(u and u[0].startswith(("PROB@", "PROB:", "GOTO:")) for u in units)
+    if not has_problem:
+        # 해설만 있는 문서: 미주로 만들 대상이 없으니 굵은 제목 + 본문으로 편다
+        result = []
+        for line in out:
+            m = re.match(r"^SOL@[^|]*\|(.*)$", line)
+            if m: result.append("SEC: " + m.group(1))
+            elif line == "SOL:": result.append("SEC: 해설")
+            elif line == "ENDSOL:": pass
+            else: result.append(line)
+        return result
+    if not any(u[0].startswith("SOL@") for u in units):
+        return [re.sub(r"^PROB@[^:]*:\s*", "PROB: ", l) if l.startswith("PROB@") else l for l in out]
+    attach: dict[int, list] = {}
+    for i, u in enumerate(units):
+        m = re.match(r"^SOL@([^|]+)\|", u[0]) if u else None
+        if not m:
+            continue
+        target = None
+        for j in range(i - 1, -1, -1):
+            pm = re.match(r"^PROB@([^:]*):", units[j][0]) if units[j] else None
+            if pm and pm.group(1) == m.group(1):
+                target = j; break
+        if target is None:
+            u[0] = "SOL:"                     # 짝을 못 찾으면 제자리에 그냥 둔다
+        else:
+            attach.setdefault(target, []).append(u)
+    result = []
+    for i, u in enumerate(units):
+        if not u:
+            continue
+        if u[0].startswith("SOL@"):
+            continue
+        if u[0].startswith("PROB@"):
+            result.append(re.sub(r"^PROB@[^:]*:\s*", "PROB: ", u[0]))
+            result.extend(l for l in u[1:] if not re.fullmatch(r"SEC:\s*(?!.*Problem)(?:[^\n]{0,12}\s)?(?:Solutions?\b.*|Answers?\b.*|해설|해답|풀이)\s*", l))
+            for su in attach.get(i, []):
+                result.append("SOL:"); result.extend(su[1:])
+                if result[-1] != "ENDSOL:": result.append("ENDSOL:")
+            continue
+        result.extend(l for l in u if not re.fullmatch(r"SEC:\s*(?!.*Problem)(?:[^\n]{0,12}\s)?(?:Solutions?\b.*|Answers?\b.*|해설|해답|풀이)\s*", l))   # 'Solutions' 절 제목은 뺀다
+    return result
+
+
 def convert(source: str, solutions: str = "endnote", renumber: str = "none",
-            start: int = 1) -> tuple[list[str], dict]:
-    if "\\begin{document}" in source:
-        source = source.split("\\begin{document}", 1)[1]
-    source = source.rsplit("\\end{document}", 1)[0]
+            start: int = 1, full_source: str | None = None) -> tuple[list[str], dict]:
+    full_source = full_source or source
+    source = strip_preamble(source)
+    source = expand_macros(full_source, source)
+    # \maketitle -> 프리앰블의 \title{...} 을 굵은 제목 줄로
+    if "\\maketitle" in source:
+        tm = re.search(r"\\title\{", full_source)
+        title = take_braced(full_source, tm.end() - 1)[0] if tm else ""
+        title = re.sub(r"\\\\\s*(\[[^\]]*\])?", " – ", title); title = re.sub(r"\s+", " ", title).strip()
+        source = source.replace("\\maketitle", ("\n\\section*{" + title + "}\n") if title else "", 1)
+    source = resolve_eqrefs(source)
+
+    tikz_note = "\n\n[그림: 원문 tikz 그림]\n\n"
+    source = re.sub(r"\\begin\{center\}\s*\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}\s*\\end\{center\}", tikz_note, source, flags=re.S)
+    source = re.sub(r"\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}", tikz_note, source, flags=re.S)
+    # 문제부/해설부를 가르는 제목: 가운데 정렬 '해설/해답', 또는 \section*{Solution|해설|해답|...}
+    hm = (re.search(r"\\begin\{center\}[^{}]*\{?\s*(?:\\[A-Za-z]+\s*)*[^{}\n]*(?:해설|해답|풀이|Solutions?)[^{}\n]*\}?\s*\\end\{center\}", source, re.I)
+          or re.search(r"\\(?:sub)?section\*?\{\s*(?:해설|해답|풀이|Solutions?)\s*\}", source, re.I))
+    if hm:
+        head, tail = source[:hm.end()], source[hm.end():]
+        # 해설부의 \section*{(3)} / {[3]} / {3} -> '(3) 해설' 헤더 (문제 번호에 묶인 해설)
+        tail = re.sub(r"\\(?:sub)?section\*?\{\s*[\(\[]?(\d{1,3})[\)\]]?\s*\}", r"\\noindent\\textbf{(\1) 해설}", tail)
+        source = head + tail
+    source = re.sub(r"(\\begin\{(?:enumerate|itemize)\})\s*\[(.*?)\](?!\})",
+                    lambda m: m.group(1) + "[" + " ".join(m.group(2).split()) + "]", source, flags=re.S)
+    source = normalize_layout(source)
+    source = protect_math_then(source, normalize_text_mode)
     source = normalize_dollars(source)
     source = normalize_top_level_environments(source)
 
@@ -450,7 +862,12 @@ def convert(source: str, solutions: str = "endnote", renumber: str = "none",
     counter = [start]
     mapping: list[tuple[str, str]] = []
     current_key = ""
+    has_solutions = bool(re.search(r"\\textbf\{[^{}]*(?:해설|Solution|Proof|풀이)", source))
+    paren_problems = bool(re.search(r"\\textbf\{\(\d{1,3}\)\s*해설", source))   # '(3) 해설' 형식 문서인가
     ITEM_STACK.clear()
+    global DEFAULT_ENUM_STYLE
+    sl = re.search(r"\\setlist\[enumerate[^\]]*\]\{[^}]*label=\(?\\(alph|roman|arabic)", full_source)
+    DEFAULT_ENUM_STYLE = {"alph": "alph", "roman": "roman"}.get(sl.group(1), "num") if sl else "num"
     stats = Counter()
     pending_notes = {index: note for index, note in figure_notes}
 
@@ -470,6 +887,8 @@ def convert(source: str, solutions: str = "endnote", renumber: str = "none",
     lines = body.split("\n")
     for index, raw in enumerate(lines):
         line = raw.rstrip()
+        if re.match(r"^\s+\\(?:noindent|medskip|bigskip|smallskip)?\s*\\textbf\{", line):
+            line = line.lstrip()          # 매크로 전개로 앞에 공백이 붙은 굵은 헤더 줄
 
         if index in pending_notes:
             flush()
@@ -483,68 +902,132 @@ def convert(source: str, solutions: str = "endnote", renumber: str = "none",
 
         # '\noindent 예제 3-2 \textbf{[그림 필요: ...]}' 꼴의 그림 체크리스트 (3장 예제 끝에 41줄).
         # 직전 해설(미주) 안에 딸려 들어가면 안 되므로 해설을 닫고 FIX: 로 보존만 한다.
-        if HEADER.match(line):
+        if SECTION.match(line):
+            position = line.index("{")
+            label, after = take_braced(line, position)
+            flush()
+            if not (in_solution and re.match(r"^\\(?:subsection|subsubsection|paragraph)", line)):
+                close_solution()
+            out.append("SEC: " + heading_text(unwrap_commands(label)).replace("{", "").replace("}", "").strip())
+            if line[after:].strip():
+                buffer.append(line[after:].strip())
+            continue
+
+        if HEADER.match(line) and (line.startswith(("\\noindent", "\\medskip", "\\bigskip", "\\smallskip")) or index == 0
+                                   or not lines[index - 1].strip() or lines[index - 1].strip() in ("\\noindent", "\\newpage", "\\medskip", "\\bigskip", "\\smallskip")):
             position = line.index("{")
             label, after = take_braced(line, position)
             label = unwrap_commands(label).strip()
             rest = line[after:].strip()
+            # '\\textbf{Problem 1.} \\textbf{(20 points)}' / '... \\hfill \\textbf{[7 points]}' -> 제목에 합침
+            rest_plain = unwrap_commands(re.sub(r"\\\\(?:hfill|quad|qquad)", " ", rest)).strip()
+            if rest_plain and len(rest_plain) <= 30 and rest_plain[0] in "([":
+                label = label + " " + rest_plain; rest = ""
 
             flush()
             attach = re.match(r"^(\d{1,3})\s*번\s*해설\s*[.:：]?\s*(.*)$", label)
             if attach:
-                # 'N번 해설.' : 기존 hwp 의 N번 문항에 미주로 붙이는 용도 (make_hwp --attach)
                 close_solution()
-                out.append("GOTO: " + attach.group(1))
-                out.append("SOL:")
-                in_solution = True
-                stats["문제"] += 1
-                stats["해설"] += 1
-                if attach.group(2):          # '19번 해설. 미적분학 3 범위이므로 생략 가능' 의 뒷부분
-                    buffer.append(attach.group(2))
-                if rest:
-                    buffer.append(rest)
+                out.append("GOTO: " + attach.group(1)); out.append("SOL:")
+                in_solution = True; stats["문제"] += 1; stats["해설"] += 1
+                if attach.group(2): buffer.append(attach.group(2))
+                if rest: buffer.append(rest)
                 continue
+
+            # 번호가 붙은 해설: 'Solution to Problem 3.' / '(3) 해설' -> 그 번호 문제 뒤로 옮긴다
+            bound = (re.match(r"^(?:문제|예제|Problem)\s*(\d{1,3}[a-z]?)\s*(?:해설|풀이|Solution)\s*[.:：]?$", label, re.I)
+                     or re.match(r"^Solution\s+(?:to|of|for)\s+Problem\s*(\d{1,3}[a-z]?)\.?\s*$", label, re.I)
+                     or re.match(r"^Solution\s*(\d{1,3}[a-z]?)\.?\s*$", label, re.I)
+                     or re.match(r"^\((\d{1,3})\)\s*해설\s*[.:：]?$", label))
+            if bound:
+                close_solution()
+                out.append("SOL@" + bound.group(1) + "|" + heading_text(label))   # 재배치 표시 (마지막에 정리)
+                in_solution = True; stats["해설"] += 1
+                if rest: buffer.append(rest)
+                continue
+
             if re.fullmatch(r"(해설|Solution|Proof)\s*[.:：]?", label, re.I):
                 for note in figure_for.pop(current_key, []):
-                    emit_paragraph(note, equations, out)
-                    stats["그림메모"] += 1
+                    emit_paragraph(note, equations, out); stats["그림메모"] += 1
                 close_solution()
                 if solutions == "inline":
-                    out.append("SEC: 해설")          # 굵은 '해설' 줄, 본문에 그대로
+                    out.append("SEC: 해설")
                 else:
-                    out.append("SOL:")
-                    in_solution = True
+                    out.append("SOL:"); in_solution = True
                 stats["해설"] += 1
-            else:
+                if rest: buffer.append(rest)
+                continue
+
+            label = re.sub(r"^\[(\d{1,3})\]\s*$", r"(\1)", label)      # '[3]' 도 문항 번호로
+            if (re.match(r"^\(\d{1,3}\)\s*$", label) and not paren_problems) or (
+                    re.match(r"^\([a-zA-Z가-힣\d]{1,3}\)", label) and not re.match(r"^\(\d{1,3}\)\s*$", label)):
+                buffer.append(unwrap_commands(line))      # 하위 문항 라벨 (1) (a) (가) ... : 본문 그대로
+                continue
+            if (not has_solutions) and re.match(r"^\d{1,3}\.\s*\S", label):
+                close_solution(); out.append("SEC: " + heading_text(label))   # '1. 요약.' : 보고서의 절 번호
+                if rest: buffer.append(rest)
+                continue
+            is_problem = (re.match(r"^(?:예제|문제)\s*\d", label) or re.match(r"^(?:예제|문제)\s*[.:：]?$", label)
+                          or re.match(r"^\[\d{1,3}\]\s*(?:문제|예제|Problem\b)", label, re.I)
+                          or re.match(r"^\d{1,3}\s*번(?:\s|$|[★☆])", label)
+                          or re.match(r"^\d{1,3}\.", label)
+                          or re.match(r"^(?:Bonus\s+|Extra\s+|Challenge\s+)?Problem\b", label, re.I) or re.match(r"^\(\d{1,3}\)\s*$", label))
+            if is_problem:
                 close_solution()
                 km = (re.match(r"^((?:예제|문제)\s*\d+[-.]\d+)", label)
+                      or re.match(r"^\[(\d{1,3})\]\s*(?:문제|예제|Problem\b)", label, re.I)
+                      or re.match(r"^(\d{1,3})\s*번(?:\s|$|[★☆])", label)
                       or re.match(r"^문제\s*(\d{1,3}[a-z]?)", label) or re.match(r"^(\d{1,3})\.", label)
-                      or re.match(r"^Problem\s*(\d{0,3}[a-z]?)", label))
+                      or re.match(r"^Problem\s*(\d{0,3}[a-z]?)", label, re.I) or re.match(r"^\((\d{1,3})\)", label))
                 current_key = km.group(1).replace(" ", "") if km else ""
-                new_label, old_label = relabel(heading_text(label), renumber, counter)
-                if old_label is not None:
-                    mapping.append((old_label, new_label))
-                out.append("PROB: " + new_label)
+                if re.match(r"^\((\d{1,3})\)\s*$", label):
+                    prob_id = km.group(1)                # '(3)' 형식은 재배치용 번호를 따로 기억
+                    out.append("PROB@" + prob_id + ": " + heading_text(label))
+                else:
+                    pm = (re.match(r"^Problem\s*(\d{1,3}[a-z]?)", label, re.I)
+                          or re.match(r"^\[(\d{1,3})\]\s*(?:문제|예제|Problem\b)", label, re.I)
+                          or re.match(r"^(\d{1,3})\s*번(?:\s|$|[★☆])", label))
+                    prob_id = pm.group(1) if pm else ""
+                    new_label, old_label = relabel(heading_text(label), renumber, counter)
+                    if old_label is not None: mapping.append((old_label, new_label))
+                    out.append(("PROB@" + prob_id + ": " if prob_id else "PROB: ") + new_label)
                 stats["문제"] += 1
-            if rest:
-                buffer.append(rest)
+            else:
+                # 그 밖의 굵은 제목 줄 (Definition 1.5 / (가) / Problems and Solutions ...) -> 굵은 제목 줄
+                out.append("SEC: " + heading_text(label))
+            if rest: buffer.append(rest)
             continue
 
         buffer.append(line)
 
     flush()
     close_solution()
+    out = reorder_bound_solutions(out)
 
     # 연속 BR: 을 최대 하나로 (문단 사이 여백은 한글에서 따로 준다)
     cleaned: list[str] = []
     for line in out:
         if line == "BR:":
             last_real = next((l for l in reversed(cleaned) if not l.startswith("FIX:")), "")
-            if last_real == "BR:":
+            if last_real in ("BR:", "NEWPAGE:"):      # 빈 줄 반복, 쪽 첫머리의 빈 줄은 버린다
                 continue
         cleaned.append(line)
-    while cleaned and cleaned[0] == "BR:":
+    while cleaned and cleaned[0] in ("BR:", "NEWPAGE:"):   # 문서 맨 앞의 빈 쪽/빈 줄은 버린다
         cleaned.pop(0)
+
+    # 해설(미주) 끝에 걸린 쪽 넘김은 미주 안에서 의미가 없다 -> 미주 밖으로 뺀다
+    result: list[str] = []
+    for line in cleaned:
+        if line == "ENDSOL:":
+            moved = []
+            while result and result[-1] in ("BR:", "NEWPAGE:"):
+                last = result.pop()
+                if last == "NEWPAGE:":
+                    moved.append(last)
+            result.append("ENDSOL:"); result.extend(moved)
+            continue
+        result.append(line)
+    cleaned = result
 
     # PROB:/SOL: 은 자체 문단을 만들고 미주는 첫 줄이 비면 안 되므로,
     # 그 직후의 BR: 과 ENDSOL:/PROB: 직전의 BR: 은 뺀다 (이전 DSL 과 같은 꼴).
@@ -553,7 +1036,7 @@ def convert(source: str, solutions: str = "endnote", renumber: str = "none",
         if line == "BR:":
             prev = next((l for l in reversed(trimmed) if not l.startswith("FIX:")), "")
             nxt = next((l for l in cleaned[index + 1:] if not l.startswith("FIX:")), "")
-            if prev == "SOL:" or prev.startswith(("PROB:", "GOTO:")):
+            if prev == "SOL:" or prev.startswith(("PROB:", "PROB@", "GOTO:", "SEC:")):
                 continue
             if nxt in ("ENDSOL:", "SOL:", "") or nxt.startswith(("PROB:", "GOTO:")):
                 continue
@@ -591,13 +1074,12 @@ def main() -> int:
             return 1
     pieces = []
     for path in args.input:
-        text = path.read_text(encoding="utf-8")
-        if "\\begin{document}" in text:
-            text = text.split("\\begin{document}", 1)[1]
-        text = text.rsplit("\\end{document}", 1)[0]
-        pieces.append(text)
+        # \begin{document} 앞이 순수 프리앰블일 때만 잘라낸다.
+        # (프리앰블 앞에 본문 조각이 붙어 있는 파일이 있어서 — 2026-09-23)
+        pieces.append(strip_preamble(path.read_text(encoding="utf-8")))
     source = "\n\n".join(pieces)
-    lines, stats = convert(source, args.solutions, args.renumber, args.start)
+    lines, stats = convert(source, args.solutions, args.renumber, args.start,
+                           full_source="\n".join(path.read_text(encoding="utf-8") for path in args.input))
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     if stats["xref_changed"]:
